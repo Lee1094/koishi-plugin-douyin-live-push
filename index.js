@@ -5,22 +5,20 @@ const path = require('path')
 const STATE_FILE = path.join(__dirname, 'live_state.json')
 
 const StreamerConfig = Schema.object({
-  name: Schema.string().required().description('主播名称（通知时显示）'),
-  account: Schema.string().required().description('抖音账号（网页版 URL 最后一段，如 https://live.douyin.com/xxxxx）'),
-  groups: Schema.array(Schema.string()).default([]).description('通知群号（留空=所有群）'),
-  enabled: Schema.boolean().default(true).description('是否启用'),
+  name: Schema.string().required().description('主播名称'),
+  account: Schema.string().required().description('抖音账号（live.douyin.com/ 后面的部分）'),
+  groups: Schema.array(Schema.string()).default([]).description('通知群号'),
+  enabled: Schema.boolean().default(true).description('启用'),
 })
 
 const Config = Schema.object({
-  interval: Schema.number().default(60).min(30).max(600).description('轮询间隔（秒，建议 60-120）'),
-  streamers: Schema.array(StreamerConfig).default([]).description('监控主播列表'),
+  interval: Schema.number().default(60).min(30).max(600).description('轮询间隔（秒）'),
+  streamers: Schema.array(StreamerConfig).default([]).description('主播列表'),
 })
 
 function apply(ctx, config) {
-  // 状态记录：account → room_status
   const statusMap = {}
 
-  // 加载上次持久化状态（防重启重复推送）
   function loadState() {
     try { if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) } catch {}
     return {}
@@ -32,70 +30,92 @@ function apply(ctx, config) {
 
   let timer = null
 
-  // ===== 构造 Cookie =====
-  function genUUID() {
-    return 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, c => {
-      const r = Math.random() * 16 | 0
-      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
-    })
-  }
-  // ttwid 格式: 1|uuid|timestamp|hash
-  const ttwid = `1|${genUUID()}|${Math.floor(Date.now() / 1000)}|${genUUID()}`
-  const cookieStr = `ttwid=${ttwid}`
-  ctx.logger.info(`[douyin] ttwid=${ttwid.substring(0, 40)}...`)
-
-  // ===== 查询单个主播状态（API 方式 + 真实 Cookie）=====
+  // ===== 查询主播：直接抓页面 HTML 提取数据 =====
   async function checkStreamer(s) {
     try {
-      const url = `https://live.douyin.com/webcast/room/web/enter/?aid=6383&device_platform=web&enter_from=web_live&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=120.0.0.0&web_rid=${s.account}`
-      const raw = await ctx.http.get(url, {
+      // 完整模拟浏览器
+      const html = await ctx.http.get(`https://live.douyin.com/${s.account}`, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-          'Referer': `https://live.douyin.com/${s.account}`,
-          'Cookie': cookieStr,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Cache-Control': 'max-age=0',
+          'Sec-Ch-Ua': '"Google Chrome";v="120", "Not?A_Brand";v="8"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"Windows"',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Upgrade-Insecure-Requests': '1',
         },
         responseType: 'text',
-        timeout: 10000,
+        timeout: 15000,
       })
 
-      if (!raw || raw.length < 10) {
-        // 可能是网络不通，试一下主页看能不能访问
+      if (!html || html.length < 500) {
+        ctx.logger.warn(`[douyin] "${s.name}" 页面过短(${html ? html.length : 0}字节)`)
+        return
+      }
+
+      // 提取 RENDER_DATA 或 __INIT_PROPS__ 中的 JSON
+      let dataObj = null
+
+      // 方法1: <script id="RENDER_DATA"> 里的 JSON
+      const rdMatch = html.match(/<script[^>]*id="RENDER_DATA"[^>]*>([\s\S]*?)<\/script>/i)
+      if (rdMatch) {
         try {
-          const test = await ctx.http.get('https://live.douyin.com/', { responseType: 'text', timeout: 5000 })
-          ctx.logger.warn(`[douyin] "${s.name}" API空但主页可达(${typeof test === 'string' ? test.length : '?'}字节)`)
-        } catch {
-          ctx.logger.error(`[douyin] 网络不通: 无法访问 live.douyin.com`)
+          let jsonStr = rdMatch[1].trim()
+          try { jsonStr = decodeURIComponent(jsonStr) } catch {}
+          dataObj = JSON.parse(jsonStr)
+          // RENDER_DATA 结构可能是 { app: { initialState: { roomStore: {...} } } }
+          const roomStore = dataObj?.app?.initialState?.roomStore
+            || dataObj?.initialState?.roomStore
+            || dataObj?.roomStore
+          if (roomStore) dataObj = roomStore
+        } catch {}
+      }
+
+      // 方法2: window.__INIT_PROPS__ 或 self.__INIT_PROPS__
+      if (!dataObj) {
+        const ipMatch = html.match(/(?:window|self)\.__INIT_PROPS__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/i)
+        if (ipMatch) {
+          try { dataObj = JSON.parse(ipMatch[1]) } catch {}
         }
+      }
+
+      // 方法3: 直接在 HTML 中找 roomStore / roomInfo
+      if (!dataObj) {
+        for (const key of ['roomStore', 'roomInfo', 'webcast']) {
+          const m = html.match(new RegExp(`"${key}"[\\s:]*([\\[{])(.*?)([\\]}])`, 's'))
+          if (m) {
+            try {
+              const str = m[1] + m[2] + m[3]
+              dataObj = JSON.parse(str)
+              break
+            } catch {}
+          }
+        }
+      }
+
+      if (!dataObj) {
+        // 都找不到，可能是页面结构不同
+        const hasRoomStore = html.includes('roomStore')
+        const hasRoomInfo = html.includes('roomInfo')
+        const hasLive = html.includes('liveStatus')
+        ctx.logger.warn(`[douyin] "${s.name}" 未找到数据(roomStore=${hasRoomStore} roomInfo=${hasRoomInfo} liveStatus=${hasLive}, ${html.length}B)`)
         return
       }
 
-      let json
-      try { json = JSON.parse(raw) } catch {
-        ctx.logger.warn(`[douyin] "${s.name}" 非JSON(${raw.length}B): ${raw.substring(0, 200)}`)
-        return
-      }
+      // 从数据中提取直播状态
+      const roomInfo = dataObj?.roomInfo || dataObj?.room || dataObj
+      const room = roomInfo?.room || roomInfo
 
-      // 响应结构: { data: { status_code, data: [...], room_status, user: {...} } }
-      const inner = json.data || json
-      const statusCode = inner.status_code
-      if (statusCode !== 0) {
-        ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode} msg=${inner.status_msg || ''}`)
-        return
-      }
-
-      const roomList = inner.data
-      if (!roomList || !Array.isArray(roomList) || roomList.length === 0) {
-        ctx.logger.info(`[douyin] "${s.name}" 未开播`)
-        updateStatus(s, 1, {})
-        return
-      }
-
-      const room = roomList[0]
-      const roomStatus = inner.room_status ?? room.status ?? room.room_status
-      const roomTitle = room.title || ''
-      const coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
-      const nickname = (inner.user && inner.user.nickname) || s.name
+      // status: 2=直播中, 4=已结束
+      const roomStatus = room?.status ?? room?.room_status ?? dataObj?.liveStatus
+      const roomTitle = room?.title || ''
+      const coverUrl = room?.cover?.url_list?.[0] || room?.cover_url || ''
+      const nickname = roomInfo?.anchor?.nickname || dataObj?.anchor?.nickname || s.name
 
       ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}"`)
 
@@ -106,7 +126,7 @@ function apply(ctx, config) {
         avatar: '',
       })
     } catch (e) {
-      ctx.logger.warn(`[douyin] "${s.name}" 查询异常: ${e.message}`)
+      ctx.logger.warn(`[douyin] "${s.name}" 异常: ${e.message}`)
     }
   }
 
@@ -114,14 +134,11 @@ function apply(ctx, config) {
     const oldStatus = statusMap[streamer.account]
 
     if (oldStatus === undefined) {
-      // 首次检测
       statusMap[streamer.account] = newStatus
       saveState()
       const isLive = (newStatus === 0 || newStatus === 2)
       ctx.logger.info(`[douyin] "${streamer.name}" 初始: ${statusLabel(newStatus)}${isLive ? ' → 推送' : ''}`)
-      if (isLive) {
-        pushLiveStart(streamer, info)
-      }
+      if (isLive) pushLiveStart(streamer, info)
       return
     }
 
@@ -138,56 +155,39 @@ function apply(ctx, config) {
   }
 
   function statusLabel(s) {
-    const map = { 0: '直播中(0)', 1: '未开播(1)', 2: '直播中(2)', 3: '回放(3)', 4: '下播(4)' }
+    const map = { 0: '直播(0)', 1: '未开播', 2: '直播(2)', 3: '回放', 4: '下播' }
     return map[s] || `未知(${s})`
   }
 
-  // ===== 推送通知 =====
+  // ===== 推送 =====
   async function pushLiveStart(s, info) {
-    const msg = [
-      `🔴 ${info.nickname || s.name} 开播了！\n标题：${info.title || '无'}\n`,
-    ]
-    // 封面图
-    if (info.cover) {
-      msg.push(h.image(info.cover))
-      msg.push('\n')
-    }
+    const msg = [`🔴 ${info.nickname || s.name} 开播了！\n标题：${info.title || '无'}\n`]
+    if (info.cover) { msg.push(h.image(info.cover)); msg.push('\n') }
     msg.push(`直播间：https://live.douyin.com/${s.account}`)
-
     await sendToGroups(s, msg)
-    ctx.logger.info(`[douyin] 🔴 "${s.name}" 开播 → 推送到 ${s.groups?.length || '所有'} 群`)
+    ctx.logger.info(`[douyin] 🔴 "${s.name}" 开播 → ${s.groups?.length || 0}群`)
   }
 
   async function pushLiveEnd(s, info) {
-    const msg = [
-      `⚫ ${info.nickname || s.name} 下播了\n直播间：https://live.douyin.com/${s.account}`,
-    ]
+    const msg = [`⚫ ${info.nickname || s.name} 下播了\n直播间：https://live.douyin.com/${s.account}`]
     await sendToGroups(s, msg)
-    ctx.logger.info(`[douyin] ⚫ "${s.name}" 下播 → 推送到 ${s.groups?.length || '所有'} 群`)
+    ctx.logger.info(`[douyin] ⚫ "${s.name}" 下播`)
   }
 
   async function sendToGroups(streamer, msg) {
     const bots = ctx.bots || []
-    if (bots.length === 0) return
-
-    const targetGroups = streamer.groups && streamer.groups.length > 0
-      ? streamer.groups
-      : null
-
+    if (!bots.length) return
     for (const bot of bots) {
-      if (targetGroups) {
-        for (const gid of targetGroups) {
-          try { await bot.sendMessage(gid, msg) } catch {}
-        }
+      const groups = streamer.groups && streamer.groups.length > 0 ? streamer.groups : null
+      if (groups) {
+        for (const gid of groups) { try { await bot.sendMessage(gid, msg) } catch {} }
       }
     }
   }
 
-  // ===== 轮询循环 =====
+  // ===== 轮询 =====
   async function pollAll() {
     const enabled = (config.streamers || []).filter(s => s.enabled !== false)
-    if (enabled.length === 0) return
-
     for (const s of enabled) {
       if (!s.account) continue
       await checkStreamer(s)
@@ -198,58 +198,28 @@ function apply(ctx, config) {
   async function start() {
     await pollAll()
     timer = setInterval(pollAll, (config.interval || 60) * 1000)
-    ctx.logger.info(`[douyin] 开始监控 ${(config.streamers || []).filter(s => s.enabled !== false).length} 个主播，间隔 ${config.interval || 60}s`)
+    ctx.logger.info(`[douyin] 监控 ${(config.streamers || []).filter(s => s.enabled !== false).length} 个主播，间隔 ${config.interval || 60}s`)
   }
 
   // ===== 命令 =====
   ctx.command('douyin', '抖音直播监控')
-    .action(() =>
-      '抖音直播开播/下播提醒\n' +
-      '配置方法：插件设置页 → 添加主播\n' +
-      'douyin.list — 查看当前监控状态\n' +
-      'douyin.check — 手动查询一次\n' +
-      'douyin.debug <账号> — 查看 API 原始响应'
-    )
+    .action(() => 'douyin.list — 状态 | douyin.check — 手动查 | 配置: 插件设置页')
 
-  ctx.command('douyin.list', '查看监控状态')
+  ctx.command('douyin.list', '查看状态')
     .action(() => {
-      const streamers = config.streamers || []
-      if (!streamers.length) return '未配置任何主播'
-      return streamers.map(s => {
+      const ss = config.streamers || []
+      if (!ss.length) return '未配置主播'
+      return ss.map(s => {
         const st = statusMap[s.account]
-        const label = st !== undefined ? statusLabel(st) : '未知'
-        return `  ${s.enabled ? '✅' : '⛔'} ${s.name} (${s.account}) → ${label}`
+        return `  ${s.enabled ? '✅' : '⛔'} ${s.name} → ${st !== undefined ? statusLabel(st) : '未知'}`
       }).join('\n')
     })
 
-  ctx.command('douyin.check', '手动查询一次')
-    .action(async () => {
-      await pollAll()
-      return '已查询，用 douyin.list 查看状态'
-    })
+  ctx.command('douyin.check', '手动查询')
+    .action(async () => { await pollAll(); return '已查，douyin.list 看结果' })
 
-  // 临时测试命令
-  ctx.command('dytest <account>', '测试抖音API')
-    .action(async ({ session }, account) => {
-      if (!account) return 'dytest 323812413279'
-      try {
-        const raw = await ctx.http.get(`https://live.douyin.com/webcast/room/web/enter/?aid=6383&web_rid=${account}&device_platform=web&enter_from=web_live&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=120&cookie_enabled=true`, {
-          headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookieStr },
-          responseType: 'text', timeout: 15000,
-        })
-        return raw ? `OK ${raw.length}B: ${raw.substring(0, 300)}` : `空响应`
-      } catch (e) {
-        return `错误: ${e.message}`
-      }
-    })
-
-  // 启动监控
   start()
-
-  // 清理
-  ctx.on('dispose', () => {
-    if (timer) clearInterval(timer)
-  })
+  ctx.on('dispose', () => { if (timer) clearInterval(timer) })
 }
 
 module.exports = { Config, apply }
