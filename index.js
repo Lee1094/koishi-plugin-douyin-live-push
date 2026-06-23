@@ -3,7 +3,6 @@ const fs = require('fs')
 const path = require('path')
 
 const DOUYIN_API = 'https://live.douyin.com/webcast/room/web/enter/'
-const TTWID_URL = 'https://ttwid.bytedance.com/ttwid/union/register/'
 const STATE_FILE = path.join(__dirname, 'live_state.json')
 
 const StreamerConfig = Schema.object({
@@ -35,39 +34,14 @@ function apply(ctx, config) {
   let ttwid = ''
   let timer = null
 
-  // ===== 获取 ttwid =====
-  async function refreshTtwid() {
-    try {
-      // 不用 json 模式，手动解析 Set-Cookie
-      const res = await ctx.http.post(TTWID_URL, {}, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Referer': 'https://live.douyin.com/',
-        },
-        responseType: 'text',
-      })
-      // 响应体是 JSON，手动提取
-      let body = res
-      if (typeof res === 'object' && res.data) body = res.data
-      if (typeof body === 'string') {
-        const json = JSON.parse(body)
-        // ttwid 可能在 cookie 字段或直接返回
-        if (json.ttwid) ttwid = json.ttwid
-      }
-      if (!ttwid) {
-        // 用随机 ttwid 兜底
-        ttwid = 'ttwid=' + Array.from({ length: 32 }, () => Math.random().toString(36)[2]).join('')
-        ctx.logger.warn('[douyin] ttwid 获取失败，用随机值兜底')
-      } else {
-        ctx.logger.info(`[douyin] ttwid 已获取`)
-      }
-    } catch (e) {
-      // 兜底
-      ttwid = 'ttwid=' + Array.from({ length: 32 }, () => Math.random().toString(36)[2]).join('')
-      ctx.logger.warn(`[douyin] ttwid 异常: ${e.message}，用随机值兜底`)
-    }
+  // ===== 生成 ttwid =====
+  function genTtwid() {
+    // ttwid 本质是浏览器指纹 UUID，本地生成即可
+    const hex = () => Math.random().toString(16).substring(2, 10)
+    return `${hex()}${hex()}${hex()}${hex()}`
   }
+  ttwid = genTtwid()
+  ctx.logger.info(`[douyin] ttwid 已生成: ${ttwid.substring(0, 16)}...`)
 
   // ===== 查询单个主播状态 =====
   async function checkStreamer(s) {
@@ -107,13 +81,14 @@ function apply(ctx, config) {
 
       if (statusCode !== 0) {
         ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode}`)
-        if (statusCode === 1500) await refreshTtwid()
+        if (statusCode === 1500) ttwid = genTtwid()
         return
       }
 
       const roomList = inner.data
       if (!roomList || (Array.isArray(roomList) && roomList.length === 0)) {
         // 没开播
+        ctx.logger.info(`[douyin] "${s.name}" 未开播`)
         updateStatus(s, 1, {})
         return
       }
@@ -131,7 +106,7 @@ function apply(ctx, config) {
         return
       }
 
-      ctx.logger.debug(`[douyin] "${s.name}" status=${roomStatus} title="${roomTitle}"`)
+      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}"`)
 
       updateStatus(s, roomStatus, {
         title: roomTitle,
@@ -140,7 +115,7 @@ function apply(ctx, config) {
         avatar: avatarUrl,
       })
     } catch (e) {
-      ctx.logger.debug(`[douyin] "${s.name}" 查询异常: ${e.message}`)
+      ctx.logger.warn(`[douyin] "${s.name}" 查询异常: ${e.message}`)
     }
   }
 
@@ -230,8 +205,7 @@ function apply(ctx, config) {
 
   // ===== 启动 =====
   async function start() {
-    await refreshTtwid()
-    // 先跑一轮初始化状态（不推送）
+    // 先跑一轮检测
     await pollAll()
     // 开始定时
     timer = setInterval(pollAll, (config.interval || 60) * 1000)
