@@ -66,54 +66,65 @@ function apply(ctx, config) {
         return
       }
 
-      // 从页面提取内嵌数据
-      // 抖音页面格式变化快，尝试多种正则
-      const patterns = [
-        /<script[^>]*id="RENDER_DATA"[^>]*>([^<]+)<\/script>/,
-        /window\.__INIT_PROPS__\s*=\s*(\{.*?\});?\s*<\/script>/s,
-        /"roomInfo":(\{.*?\})\s*[,}]/s,
-        /"roomStore":(\{.*?\})\s*[,}]/s,
-        /"room":\s*(\{[^}]*?"status"\s*:\s*\d+[^}]*\})/,
-      ]
+      // 从页面提取内嵌数据 —— 用手动括号计数提取完整 JSON 块
+      let roomInfo = null
+      let roomStatus = null
+      let roomTitle = ''
+      let coverUrl = ''
+      let nickname = s.name
+      let avatarUrl = ''
 
-      let jsonStr = null
-      for (const re of patterns) {
-        const m = html.match(re)
-        if (m) { jsonStr = m[1]; try { jsonStr = decodeURIComponent(jsonStr) } catch {}; break }
+      // 方法: 找到 "roomStore" 位置，用计数器提取完整 JSON 对象
+      const extractJSON = (str, key) => {
+        const pos = str.indexOf(`"${key}":`)
+        if (pos < 0) return null
+        let start = pos + key.length + 3 // skip "key":
+        while (start < str.length && str[start] !== '{' && str[start] !== '[') start++
+        if (start >= str.length) return null
+        const open = str[start]
+        const close = open === '{' ? '}' : ']'
+        let depth = 0, i = start
+        while (i < str.length) {
+          if (str[i] === '\\') { i += 2; continue }
+          if (str[i] === open) depth++
+          else if (str[i] === close) { depth--; if (depth === 0) break }
+          i++
+        }
+        return str.substring(start, i + 1)
       }
 
-      if (!jsonStr) {
-        // 打印 HTML 中包含 roomStore/roomInfo 的片段帮助调试
-        const idx = html.indexOf('roomStore')
-        const snippet = idx > 0 ? html.substring(Math.max(0, idx - 100), idx + 300) : '(无)'
-        ctx.logger.warn(`[douyin] "${s.name}" 未找到数据, roomStore位置=${idx}, 附近: ${snippet.replace(/\n/g,' ').substring(0, 300)}`)
+      const roomStoreJSON = extractJSON(html, 'roomStore')
+      if (!roomStoreJSON) {
+        ctx.logger.warn(`[douyin] "${s.name}" 未找到 roomStore`)
         return
       }
 
-      const data = JSON.parse(jsonStr)
-      // 数据路径: state.roomStore.roomInfo 或直接 roomInfo
-      const roomInfo = data?.roomInfo
-        || data?.state?.roomStore?.roomInfo
-        || data?.initialState?.roomStore?.roomInfo
-
-      if (!roomInfo) {
-        ctx.logger.warn(`[douyin] "${s.name}" 找不到 roomInfo`)
+      try {
+        const roomStore = JSON.parse(roomStoreJSON)
+        roomInfo = roomStore.roomInfo || {}
+        roomStatus = roomStore.liveStatus || (roomInfo.room ? roomInfo.room.status : undefined)
+        // liveStatus 是字符串: "normal"=未开播, 直播时会变成数字或 "live"
+        // roomInfo.room.status 是数字: 2=直播中
+      } catch {
+        ctx.logger.warn(`[douyin] "${s.name}" roomStore JSON 解析失败`)
         return
       }
 
-      const room = roomInfo.room || roomInfo
-      const roomStatus = room.status  // 2=直播中
-      const roomTitle = room.title || ''
-      const coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
-      const nickname = (roomInfo.anchor && roomInfo.anchor.nickname) || s.name
-      const avatarUrl = (roomInfo.anchor && roomInfo.anchor.avatar_thumb && roomInfo.anchor.avatar_thumb.url_list && roomInfo.anchor.avatar_thumb.url_list[0]) || ''
-
-      if (roomStatus === undefined || roomStatus === null) {
-        ctx.logger.warn(`[douyin] "${s.name}" 无法获取 status, keys: ${Object.keys(room).join(',')}`)
-        return
+      // 检查 roomInfo 是否为空（未开播）
+      const hasRoom = roomInfo && roomInfo.room
+      if (hasRoom) {
+        const room = roomInfo.room
+        roomStatus = room.status
+        roomTitle = room.title || ''
+        coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
+        nickname = (roomInfo.anchor && roomInfo.anchor.nickname) || s.name
+        avatarUrl = (roomInfo.anchor && roomInfo.anchor.avatar_thumb && roomInfo.anchor.avatar_thumb.url_list && roomInfo.anchor.avatar_thumb.url_list[0]) || ''
+      } else {
+        // 未开播
+        roomStatus = roomStatus === 'live' ? 2 : 1
       }
 
-      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}"`)
+      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} roomInfo=${hasRoom ? '有' : '空'}`)
 
       updateStatus(s, roomStatus, {
         title: roomTitle,
