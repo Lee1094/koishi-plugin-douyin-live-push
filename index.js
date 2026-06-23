@@ -1,7 +1,10 @@
 const { Schema, h } = require('koishi')
+const fs = require('fs')
+const path = require('path')
 
 const DOUYIN_API = 'https://live.douyin.com/webcast/room/web/enter/'
 const TTWID_URL = 'https://ttwid.bytedance.com/ttwid/union/register/'
+const STATE_FILE = path.join(__dirname, 'live_state.json')
 
 const StreamerConfig = Schema.object({
   name: Schema.string().required().description('主播名称（通知时显示）'),
@@ -16,9 +19,19 @@ const Config = Schema.object({
 })
 
 function apply(ctx, config) {
-  // 状态记录：account → room_status (null=未知, 1=下播, 2=直播中...)
-  // Douyin 的 room_status: 0=直播中, 1=未开播, 2=回放 etc.
+  // 状态记录：account → room_status
   const statusMap = {}
+
+  // 加载上次持久化状态（防重启重复推送）
+  function loadState() {
+    try { if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) } catch {}
+    return {}
+  }
+  function saveState() {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(statusMap, null, 2), 'utf-8')
+  }
+  Object.assign(statusMap, loadState())
+
   let ttwid = ''
   let timer = null
 
@@ -129,22 +142,27 @@ function apply(ctx, config) {
 
   function updateStatus(streamer, newStatus, info) {
     const oldStatus = statusMap[streamer.account]
+
     if (oldStatus === undefined) {
-      // 首次检测，记录初始状态不推送
+      // 首次检测
       statusMap[streamer.account] = newStatus
-      ctx.logger.info(`[douyin] "${streamer.name}" 初始状态: ${statusLabel(newStatus)}`)
+      saveState()
+      const isLive = (newStatus === 0 || newStatus === 2)
+      ctx.logger.info(`[douyin] "${streamer.name}" 初始: ${statusLabel(newStatus)}${isLive ? ' → 推送' : ''}`)
+      if (isLive) {
+        pushLiveStart(streamer, info)
+      }
       return
     }
 
-    if (oldStatus === newStatus) return // 没变化
+    if (oldStatus === newStatus) return
 
     statusMap[streamer.account] = newStatus
+    saveState()
 
-    if (newStatus === 2 || newStatus === 0) {
-      // 开播了（抖音 room_status=2 通常是直播中，有些接口用 0）
+    if (newStatus === 0 || newStatus === 2) {
       pushLiveStart(streamer, info)
     } else if (newStatus === 1 || newStatus === 3 || newStatus === 4) {
-      // 下播了
       pushLiveEnd(streamer, info)
     }
   }
