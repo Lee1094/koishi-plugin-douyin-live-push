@@ -1,4 +1,4 @@
-const { Schema } = require('koishi')
+const { Schema, h } = require('koishi')
 
 const DOUYIN_API = 'https://live.douyin.com/webcast/room/web/enter/'
 const TTWID_URL = 'https://ttwid.bytedance.com/ttwid/union/register/'
@@ -155,43 +155,42 @@ function apply(ctx, config) {
   }
 
   // ===== 推送通知 =====
-  function pushLiveStart(s, info) {
+  async function pushLiveStart(s, info) {
     const msg = [
-      `🔴 **${info.nickname || s.name}** 开播了！`,
-      `标题：${info.title || '无'}`,
-      `直播间：https://live.douyin.com/${s.account}`,
-    ].join('\n')
+      `🔴 ${info.nickname || s.name} 开播了！\n标题：${info.title || '无'}\n`,
+    ]
+    // 封面图
+    if (info.cover) {
+      msg.push(h.image(info.cover))
+      msg.push('\n')
+    }
+    msg.push(`直播间：https://live.douyin.com/${s.account}`)
 
-    sendToGroups(s, msg)
+    await sendToGroups(s, msg)
     ctx.logger.info(`[douyin] 🔴 "${s.name}" 开播 → 推送到 ${s.groups?.length || '所有'} 群`)
   }
 
-  function pushLiveEnd(s, info) {
+  async function pushLiveEnd(s, info) {
     const msg = [
-      `⚫ **${info.nickname || s.name}** 下播了`,
-      `直播间：https://live.douyin.com/${s.account}`,
-    ].join('\n')
-
-    sendToGroups(s, msg)
+      `⚫ ${info.nickname || s.name} 下播了\n直播间：https://live.douyin.com/${s.account}`,
+    ]
+    await sendToGroups(s, msg)
     ctx.logger.info(`[douyin] ⚫ "${s.name}" 下播 → 推送到 ${s.groups?.length || '所有'} 群`)
   }
 
-  function sendToGroups(streamer, msg) {
+  async function sendToGroups(streamer, msg) {
     const bots = ctx.bots || []
     if (bots.length === 0) return
 
     const targetGroups = streamer.groups && streamer.groups.length > 0
       ? streamer.groups
-      : null // null = 所有群
+      : null
 
     for (const bot of bots) {
       if (targetGroups) {
         for (const gid of targetGroups) {
-          bot.sendMessage(gid, msg).catch(() => {})
+          try { await bot.sendMessage(gid, msg) } catch {}
         }
-      } else {
-        bot.sendMessage('0', msg).catch(() => {})
-        // 发到频道日志也行，这里简化处理
       }
     }
   }
