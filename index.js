@@ -38,31 +38,34 @@ function apply(ctx, config) {
   // ===== 获取 ttwid =====
   async function refreshTtwid() {
     try {
+      // 不用 json 模式，手动解析 Set-Cookie
       const res = await ctx.http.post(TTWID_URL, {}, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Content-Type': 'application/x-www-form-urlencoded',
           'Referer': 'https://live.douyin.com/',
         },
-        responseType: 'json',
+        responseType: 'text',
       })
-      if (res.cookies) {
-        for (const c of res.cookies) {
-          if (c.name === 'ttwid') {
-            ttwid = c.value
-            ctx.logger.info(`[douyin] ttwid 已获取: ${ttwid.substring(0, 10)}...`)
-            return
-          }
-        }
+      // 响应体是 JSON，手动提取
+      let body = res
+      if (typeof res === 'object' && res.data) body = res.data
+      if (typeof body === 'string') {
+        const json = JSON.parse(body)
+        // ttwid 可能在 cookie 字段或直接返回
+        if (json.ttwid) ttwid = json.ttwid
       }
-      // 尝试从 set-cookie 头提取
-      const setCookie = res.headers?.['set-cookie']
-      if (setCookie) {
-        const match = /ttwid=([^;]+)/.exec(Array.isArray(setCookie) ? setCookie.join(';') : setCookie)
-        if (match) ttwid = match[1]
+      if (!ttwid) {
+        // 用随机 ttwid 兜底
+        ttwid = 'ttwid=' + Array.from({ length: 32 }, () => Math.random().toString(36)[2]).join('')
+        ctx.logger.warn('[douyin] ttwid 获取失败，用随机值兜底')
+      } else {
+        ctx.logger.info(`[douyin] ttwid 已获取`)
       }
     } catch (e) {
-      ctx.logger.error(`[douyin] 获取 ttwid 失败: ${e.message}`)
+      // 兜底
+      ttwid = 'ttwid=' + Array.from({ length: 32 }, () => Math.random().toString(36)[2]).join('')
+      ctx.logger.warn(`[douyin] ttwid 异常: ${e.message}，用随机值兜底`)
     }
   }
 
@@ -70,12 +73,12 @@ function apply(ctx, config) {
   async function checkStreamer(s) {
     try {
       const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9',
         'Referer': `https://live.douyin.com/${s.account}`,
+        'Cookie': `ttwid=${ttwid}`,
       }
-      if (ttwid) headers['Cookie'] = `ttwid=${ttwid}`
 
       const res = await ctx.http.get(DOUYIN_API, {
         params: {
@@ -86,7 +89,7 @@ function apply(ctx, config) {
           browser_language: 'zh-CN',
           browser_platform: 'Win32',
           browser_name: 'Chrome',
-          browser_version: '109.0.0.0',
+          browser_version: '120.0.0.0',
           web_rid: s.account,
         },
         headers,
@@ -94,39 +97,41 @@ function apply(ctx, config) {
         timeout: 10000,
       })
 
-      // 检查响应
-      if (!res || typeof res !== 'object') {
-        ctx.logger.warn(`[douyin] "${s.name}" 响应异常: ${typeof res}`)
-        return
-      }
+      // res 就是解析后的 JSON
+      const json = res
+      if (!json || typeof json !== 'object') return
 
-      const inner = res.data
-      if (!inner) {
-        ctx.logger.warn(`[douyin] "${s.name}" 无 data 字段`)
-        return
-      }
-
+      // Douyin 响应结构: { data: { status_code: 0, data: [...], room_status: 2, user: {...} } }
+      const inner = json.data || json
       const statusCode = inner.status_code
+
       if (statusCode !== 0) {
         ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode}`)
-        // 可能是 ttwid 过期
         if (statusCode === 1500) await refreshTtwid()
         return
       }
 
-      const roomData = inner.data
-      if (!roomData || (Array.isArray(roomData) && roomData.length === 0)) {
-        ctx.logger.debug(`[douyin] "${s.name}" 未开播或无直播数据`)
+      const roomList = inner.data
+      if (!roomList || (Array.isArray(roomList) && roomList.length === 0)) {
+        // 没开播
         updateStatus(s, 1, {})
         return
       }
 
-      const data = Array.isArray(roomData) ? roomData[0] : roomData
-      const roomStatus = data.status // 直播间状态
-      const roomTitle = data.title || ''
-      const coverUrl = data.cover?.url_list?.[0] || ''
-      const nickname = inner.user?.nickname || s.name
-      const avatarUrl = inner.user?.avatar_thumb?.url_list?.[0] || ''
+      const room = Array.isArray(roomList) ? roomList[0] : roomList
+      // room_status 位置：inner.room_status 或 room.status
+      const roomStatus = inner.room_status ?? room.status ?? room.room_status
+      const roomTitle = room.title || ''
+      const coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
+      const nickname = (inner.user && inner.user.nickname) || s.name
+      const avatarUrl = (inner.user && inner.user.avatar_thumb && inner.user.avatar_thumb.url_list && inner.user.avatar_thumb.url_list[0]) || ''
+
+      if (roomStatus === undefined || roomStatus === null) {
+        ctx.logger.warn(`[douyin] "${s.name}" 无法获取 room_status, 响应: ${JSON.stringify(inner).substring(0, 200)}`)
+        return
+      }
+
+      ctx.logger.debug(`[douyin] "${s.name}" status=${roomStatus} title="${roomTitle}"`)
 
       updateStatus(s, roomStatus, {
         title: roomTitle,
@@ -135,8 +140,7 @@ function apply(ctx, config) {
         avatar: avatarUrl,
       })
     } catch (e) {
-      // 网络错误静默，下轮重试
-      ctx.logger.debug(`[douyin] "${s.name}" 查询失败: ${e.message}`)
+      ctx.logger.debug(`[douyin] "${s.name}" 查询异常: ${e.message}`)
     }
   }
 
