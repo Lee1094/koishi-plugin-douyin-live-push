@@ -47,18 +47,8 @@ function apply(ctx, config) {
   // ===== 查询单个主播状态（API 方式 + 真实 Cookie）=====
   async function checkStreamer(s) {
     try {
-      const raw = await ctx.http.get('https://live.douyin.com/webcast/room/web/enter/', {
-        params: {
-          aid: '6383',
-          device_platform: 'web',
-          enter_from: 'web_live',
-          cookie_enabled: 'true',
-          browser_language: 'zh-CN',
-          browser_platform: 'Win32',
-          browser_name: 'Chrome',
-          browser_version: '120.0.0.0',
-          web_rid: s.account,
-        },
+      const url = `https://live.douyin.com/webcast/room/web/enter/?aid=6383&device_platform=web&enter_from=web_live&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=120.0.0.0&web_rid=${s.account}`
+      const raw = await ctx.http.get(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'application/json',
@@ -70,7 +60,13 @@ function apply(ctx, config) {
       })
 
       if (!raw || raw.length < 10) {
-        ctx.logger.warn(`[douyin] "${s.name}" 响应过短(${raw ? raw.length : 0}字节)`)
+        // 可能是网络不通，试一下主页看能不能访问
+        try {
+          const test = await ctx.http.get('https://live.douyin.com/', { responseType: 'text', timeout: 5000 })
+          ctx.logger.warn(`[douyin] "${s.name}" API空但主页可达(${typeof test === 'string' ? test.length : '?'}字节)`)
+        } catch {
+          ctx.logger.error(`[douyin] 网络不通: 无法访问 live.douyin.com`)
+        }
         return
       }
 
