@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-douyin-live-push",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Douyin live status monitor — push go-live/offline alerts to QQ groups",
   "main": "index.js",
   "license": "MIT",

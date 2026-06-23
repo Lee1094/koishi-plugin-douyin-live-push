@@ -66,27 +66,27 @@ function apply(ctx, config) {
         return
       }
 
-      // 从页面提取内嵌 JSON: window.__INIT_PROPS__ = {...} 或 "state":{...}
-      // 抖音在页面里嵌了两个 JS 变量: RENDER_DATA 和 __INIT_PROPS__
+      // 从页面提取内嵌数据
+      // 抖音页面格式变化快，尝试多种正则
       const patterns = [
-        /window\.__INIT_PROPS__\s*=\s*(\{.*?\});\s*<\/script>/s,
         /<script[^>]*id="RENDER_DATA"[^>]*>([^<]+)<\/script>/,
-        /"state":(\{.*?"roomStore".*?\})\s*<\/script>/s,
+        /window\.__INIT_PROPS__\s*=\s*(\{.*?\});?\s*<\/script>/s,
+        /"roomInfo":(\{.*?\})\s*[,}]/s,
+        /"roomStore":(\{.*?\})\s*[,}]/s,
+        /"room":\s*(\{[^}]*?"status"\s*:\s*\d+[^}]*\})/,
       ]
 
       let jsonStr = null
       for (const re of patterns) {
         const m = html.match(re)
-        if (m) {
-          jsonStr = m[1]
-          // 处理 URL 编码的 JSON
-          try { jsonStr = decodeURIComponent(jsonStr) } catch {}
-          break
-        }
+        if (m) { jsonStr = m[1]; try { jsonStr = decodeURIComponent(jsonStr) } catch {}; break }
       }
 
       if (!jsonStr) {
-        ctx.logger.warn(`[douyin] "${s.name}" 未找到内嵌数据 (${html.length}字节)`)
+        // 打印 HTML 中包含 roomStore/roomInfo 的片段帮助调试
+        const idx = html.indexOf('roomStore')
+        const snippet = idx > 0 ? html.substring(Math.max(0, idx - 100), idx + 300) : '(无)'
+        ctx.logger.warn(`[douyin] "${s.name}" 未找到数据, roomStore位置=${idx}, 附近: ${snippet.replace(/\n/g,' ').substring(0, 300)}`)
         return
       }
 
