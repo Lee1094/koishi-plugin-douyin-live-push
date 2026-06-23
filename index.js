@@ -48,13 +48,14 @@ function apply(ctx, config) {
     try {
       const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'zh-CN,zh;q=0.9',
         'Referer': `https://live.douyin.com/${s.account}`,
         'Cookie': `ttwid=${ttwid}`,
       }
 
-      const res = await ctx.http.get(DOUYIN_API, {
+      // 先取 text，看原始响应
+      const raw = await ctx.http.get(DOUYIN_API, {
         params: {
           aid: '6383',
           device_platform: 'web',
@@ -67,34 +68,40 @@ function apply(ctx, config) {
           web_rid: s.account,
         },
         headers,
-        responseType: 'json',
+        responseType: 'text',
         timeout: 10000,
       })
 
-      // res 就是解析后的 JSON
-      const json = res
-      if (!json || typeof json !== 'object') return
+      if (!raw || raw.length === 0) {
+        ctx.logger.warn(`[douyin] "${s.name}" 响应为空`)
+        return
+      }
 
-      // Douyin 响应结构: { data: { status_code: 0, data: [...], room_status: 2, user: {...} } }
-      const inner = json.data || json
+      // 尝试解析 JSON
+      let json
+      try {
+        json = JSON.parse(raw)
+      } catch {
+        ctx.logger.warn(`[douyin] "${s.name}" 非JSON响应(${raw.length}字节): ${raw.substring(0, 200)}`)
+        return
+      }
+
+      const inner = (json && json.data) || json
       const statusCode = inner.status_code
 
       if (statusCode !== 0) {
-        ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode}`)
-        if (statusCode === 1500) ttwid = genTtwid()
+        ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode}, msg=${inner.status_msg || ''}`)
         return
       }
 
       const roomList = inner.data
       if (!roomList || (Array.isArray(roomList) && roomList.length === 0)) {
-        // 没开播
         ctx.logger.info(`[douyin] "${s.name}" 未开播`)
         updateStatus(s, 1, {})
         return
       }
 
       const room = Array.isArray(roomList) ? roomList[0] : roomList
-      // room_status 位置：inner.room_status 或 room.status
       const roomStatus = inner.room_status ?? room.status ?? room.room_status
       const roomTitle = room.title || ''
       const coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
@@ -102,7 +109,7 @@ function apply(ctx, config) {
       const avatarUrl = (inner.user && inner.user.avatar_thumb && inner.user.avatar_thumb.url_list && inner.user.avatar_thumb.url_list[0]) || ''
 
       if (roomStatus === undefined || roomStatus === null) {
-        ctx.logger.warn(`[douyin] "${s.name}" 无法获取 room_status, 响应: ${JSON.stringify(inner).substring(0, 200)}`)
+        ctx.logger.warn(`[douyin] "${s.name}" 无法获取 room_status, 响应keys: ${Object.keys(inner).join(',')}`)
         return
       }
 
