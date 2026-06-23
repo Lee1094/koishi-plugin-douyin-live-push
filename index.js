@@ -58,54 +58,63 @@ function apply(ctx, config) {
         return
       }
 
-      // 括号计数提取完整 JSON 块
-      const extractJSON = (str, key) => {
-        // 先定位 key
-        const idx = str.indexOf(`"${key}"`)
-        if (idx < 0) return null
-        // 从 key 后面找第一个 { 或 [
-        let i = idx + key.length + 2 // skip "key"
-        while (i < str.length && str[i] !== '{' && str[i] !== '[') i++
-        if (i >= str.length) return null
-        const open = str[i], close = open === '{' ? '}' : ']'
-        let depth = 0, start = i
-        while (i < str.length) {
-          if (str[i] === '\\') { i += 2; continue }
-          if (str[i] === open) depth++
-          else if (str[i] === close) { depth--; if (depth === 0) break }
-          i++
-        }
-        if (depth !== 0) return null
-        try { return JSON.parse(str.substring(start, i + 1)) } catch { return null }
+      // 尝试多种方式提取直播数据
+      let roomStatus = null, roomTitle = '', coverUrl = '', nickname = s.name
+
+      // 方式1: RENDER_DATA 脚本标签（最干净的 JSON）
+      const rdMatch = html.match(/<script[^>]*id="RENDER_DATA"[^>]*>([\s\S]*?)<\/script>/i)
+      if (rdMatch) {
+        try {
+          const rd = JSON.parse(decodeURIComponent(rdMatch[1].trim()))
+          const rs = getNested(rd, 'app.initialState.roomStore') || getNested(rd, 'roomStore')
+          if (rs) parseRoomStore(rs)
+        } catch {}
       }
 
-      // 提取 roomStore
-      let roomStore = extractJSON(html, 'roomStore')
-      if (!roomStore) {
-        // 备选: 从 __INIT_PROPS__ 整块提取
-        const ipMatch = html.match(/(?:window|self)\.__INIT_PROPS__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/i)
-        if (ipMatch) {
+      // 方式2: __INIT_PROPS__
+      if (roomStatus == null) {
+        const ip = html.match(/self\.__INIT_PROPS__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/i)
+        if (ip) {
           try {
-            const initProps = JSON.parse(ipMatch[1])
-            roomStore = initProps?.roomStore || initProps?.app?.initialState?.roomStore
+            const props = JSON.parse(ip[1])
+            const rs = getNested(props, 'roomStore') || getNested(props, 'app.initialState.roomStore')
+            if (rs) parseRoomStore(rs)
           } catch {}
         }
       }
 
-      if (!roomStore) {
-        ctx.logger.warn(`[douyin] "${s.name}" 未提取到 roomStore (${html.length}B)`)
+      // 方式3: 在页面任意位置找 roomInfo 或 status
+      if (roomStatus == null) {
+        // 找 "status":2 或 "status":4 等直播状态
+        const st = html.match(/"status"\s*:\s*(\d+)/)
+        const title = html.match(/"title"\s*:\s*"([^"]+)"/)
+        if (st) roomStatus = parseInt(st[1])
+        if (title) roomTitle = title[1]
+      }
+
+      function getNested(obj, path) {
+        return path.split('.').reduce((o, k) => o?.[k], obj)
+      }
+
+      function parseRoomStore(rs) {
+        const ri = rs.roomInfo || {}
+        const room = ri.room
+        if (room) {
+          roomStatus = room.status
+          roomTitle = room.title || ''
+          coverUrl = room.cover?.url_list?.[0] || ''
+          nickname = ri.anchor?.nickname || s.name
+        } else {
+          roomStatus = rs.liveStatus === 'live' ? 2 : 1
+        }
+      }
+
+      if (roomStatus == null) {
+        ctx.logger.warn(`[douyin] "${s.name}" 未提取到状态 (${html.length}B)`)
         return
       }
 
-      // 提取直播状态
-      const roomInfo = roomStore.roomInfo || {}
-      const room = roomInfo.room
-      const roomStatus = room ? room.status : (roomStore.liveStatus === 'live' ? 2 : 1)
-      const roomTitle = room?.title || ''
-      const coverUrl = room?.cover?.url_list?.[0] || ''
-      const nickname = roomInfo?.anchor?.nickname || s.name
-
-      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}" roomInfo=${!!room}`)
+      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}"`)
 
       updateStatus(s, roomStatus, {
         title: roomTitle,
