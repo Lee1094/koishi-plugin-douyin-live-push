@@ -33,15 +33,16 @@ function apply(ctx, config) {
   let timer = null
 
   // ===== 构造 Cookie =====
-  // ttwid 是核心认证 cookie，本地生成 uuid 格式即可
   function genUUID() {
     return 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const r = Math.random() * 16 | 0
       return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
     })
   }
-  const cookieStr = `ttwid=1|${genUUID()}|${genUUID()}|${Math.floor(Date.now() / 1000)}|${genUUID()}`
-  ctx.logger.info(`[douyin] Cookie: ${cookieStr.substring(0, 60)}...`)
+  // ttwid 格式: 1|uuid|timestamp|hash
+  const ttwid = `1|${genUUID()}|${Math.floor(Date.now() / 1000)}|${genUUID()}`
+  const cookieStr = `ttwid=${ttwid}`
+  ctx.logger.info(`[douyin] ttwid=${ttwid.substring(0, 40)}...`)
 
   // ===== 查询单个主播状态（API 方式 + 真实 Cookie）=====
   async function checkStreamer(s) {
