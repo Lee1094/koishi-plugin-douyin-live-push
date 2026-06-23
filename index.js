@@ -58,66 +58,53 @@ function apply(ctx, config) {
         return
       }
 
-      // 提取 RENDER_DATA 或 __INIT_PROPS__ 中的 JSON
-      let dataObj = null
-
-      // 方法1: <script id="RENDER_DATA"> 里的 JSON
-      const rdMatch = html.match(/<script[^>]*id="RENDER_DATA"[^>]*>([\s\S]*?)<\/script>/i)
-      if (rdMatch) {
-        try {
-          let jsonStr = rdMatch[1].trim()
-          try { jsonStr = decodeURIComponent(jsonStr) } catch {}
-          dataObj = JSON.parse(jsonStr)
-          // RENDER_DATA 结构可能是 { app: { initialState: { roomStore: {...} } } }
-          const roomStore = dataObj?.app?.initialState?.roomStore
-            || dataObj?.initialState?.roomStore
-            || dataObj?.roomStore
-          if (roomStore) dataObj = roomStore
-        } catch {}
+      // 括号计数提取完整 JSON 块
+      const extractJSON = (str, key) => {
+        const re = new RegExp(`"${key}"\\s*:\\s*`)
+        const m = str.match(re)
+        if (!m) return null
+        let i = m.index + m[0].length
+        while (i < str.length && /\s/.test(str[i])) i++
+        if (i >= str.length || (str[i] !== '{' && str[i] !== '[')) return null
+        const open = str[i], close = open === '{' ? '}' : ']'
+        let depth = 0, start = i
+        while (i < str.length) {
+          if (str[i] === '\\') { i += 2; continue }
+          if (str[i] === open) depth++
+          else if (str[i] === close) { depth--; if (depth === 0) break }
+          i++
+        }
+        if (depth !== 0) return null
+        try { return JSON.parse(str.substring(start, i + 1)) } catch { return null }
       }
 
-      // 方法2: window.__INIT_PROPS__ 或 self.__INIT_PROPS__
-      if (!dataObj) {
+      // 提取 roomStore
+      let roomStore = extractJSON(html, 'roomStore')
+      if (!roomStore) {
+        // 备选: 从 __INIT_PROPS__ 整块提取
         const ipMatch = html.match(/(?:window|self)\.__INIT_PROPS__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/i)
         if (ipMatch) {
-          try { dataObj = JSON.parse(ipMatch[1]) } catch {}
+          try {
+            const initProps = JSON.parse(ipMatch[1])
+            roomStore = initProps?.roomStore || initProps?.app?.initialState?.roomStore
+          } catch {}
         }
       }
 
-      // 方法3: 直接在 HTML 中找 roomStore / roomInfo
-      if (!dataObj) {
-        for (const key of ['roomStore', 'roomInfo', 'webcast']) {
-          const m = html.match(new RegExp(`"${key}"[\\s:]*([\\[{])(.*?)([\\]}])`, 's'))
-          if (m) {
-            try {
-              const str = m[1] + m[2] + m[3]
-              dataObj = JSON.parse(str)
-              break
-            } catch {}
-          }
-        }
-      }
-
-      if (!dataObj) {
-        // 都找不到，可能是页面结构不同
-        const hasRoomStore = html.includes('roomStore')
-        const hasRoomInfo = html.includes('roomInfo')
-        const hasLive = html.includes('liveStatus')
-        ctx.logger.warn(`[douyin] "${s.name}" 未找到数据(roomStore=${hasRoomStore} roomInfo=${hasRoomInfo} liveStatus=${hasLive}, ${html.length}B)`)
+      if (!roomStore) {
+        ctx.logger.warn(`[douyin] "${s.name}" 未提取到 roomStore (${html.length}B)`)
         return
       }
 
-      // 从数据中提取直播状态
-      const roomInfo = dataObj?.roomInfo || dataObj?.room || dataObj
-      const room = roomInfo?.room || roomInfo
-
-      // status: 2=直播中, 4=已结束
-      const roomStatus = room?.status ?? room?.room_status ?? dataObj?.liveStatus
+      // 提取直播状态
+      const roomInfo = roomStore.roomInfo || {}
+      const room = roomInfo.room
+      const roomStatus = room ? room.status : (roomStore.liveStatus === 'live' ? 2 : 1)
       const roomTitle = room?.title || ''
-      const coverUrl = room?.cover?.url_list?.[0] || room?.cover_url || ''
-      const nickname = roomInfo?.anchor?.nickname || dataObj?.anchor?.nickname || s.name
+      const coverUrl = room?.cover?.url_list?.[0] || ''
+      const nickname = roomInfo?.anchor?.nickname || s.name
 
-      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}"`)
+      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}" roomInfo=${!!room}`)
 
       updateStatus(s, roomStatus, {
         title: roomTitle,
