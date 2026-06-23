@@ -97,7 +97,15 @@ function apply(ctx, config) {
 
       const roomStoreJSON = extractJSON(html, 'roomStore')
       if (!roomStoreJSON) {
-        ctx.logger.warn(`[douyin] "${s.name}" 未找到 roomStore (页面${html.length}字节) 头部: ${html.substring(0, 100)}`)
+        // 没找到 roomStore，搜其他可能的 key
+        const keys = ['roomStore', 'roomInfo', '__INIT_PROPS__', 'RENDER_DATA', 'liveStatus', 'webcast']
+        const found = keys.filter(k => html.indexOf(`"${k}"`) > 0)
+        ctx.logger.warn(`[douyin] "${s.name}" 未找到 roomStore, 找到的key: ${found.join(',')}`)
+        if (found.length === 0) {
+          // 打印页面中间部分看看
+          const mid = Math.floor(html.length / 2)
+          ctx.logger.warn(`[douyin] 页面中间: ${html.substring(mid, mid + 200)}`)
+        }
         return
       }
 
