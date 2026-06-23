@@ -207,7 +207,8 @@ function apply(ctx, config) {
       '抖音直播开播/下播提醒\n' +
       '配置方法：插件设置页 → 添加主播\n' +
       'douyin.list — 查看当前监控状态\n' +
-      'douyin.check — 手动查询一次'
+      'douyin.check — 手动查询一次\n' +
+      'douyin.debug <账号> — 查看 API 原始响应'
     )
 
   ctx.command('douyin.list', '查看监控状态')
@@ -227,9 +228,9 @@ function apply(ctx, config) {
       return '已查询，用 douyin.list 查看状态'
     })
 
-  ctx.command('douyin.test <account>', '测试指定账号的 API 原始响应')
+  ctx.command('douyin.debug <account>', '查看 API 原始响应')
     .action(async ({ session }, account) => {
-      if (!account) return '请提供抖音账号，用法: douyin.test 323812413279'
+      if (!account) return '请提供抖音账号，用法: douyin.debug 323812413279'
       try {
         const url = `https://live.douyin.com/webcast/room/web/enter/?aid=6383&device_platform=web&enter_from=web_live&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=120.0.0.0&web_rid=${account}`
         const raw = await ctx.http.get(url, {
