@@ -228,19 +228,16 @@ function apply(ctx, config) {
       return '已查询，用 douyin.list 查看状态'
     })
 
-  ctx.command('douyin.debug <account>', '查看 API 原始响应')
+  // 临时测试命令
+  ctx.command('dytest <account>', '测试抖音API')
     .action(async ({ session }, account) => {
-      if (!account) return '请提供抖音账号，用法: douyin.debug 323812413279'
+      if (!account) return 'dytest 323812413279'
       try {
-        const url = `https://live.douyin.com/webcast/room/web/enter/?aid=6383&device_platform=web&enter_from=web_live&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=120.0.0.0&web_rid=${account}`
-        const raw = await ctx.http.get(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Cookie': cookieStr, 'Referer': `https://live.douyin.com/${account}` },
-          responseType: 'text', timeout: 10000,
+        const raw = await ctx.http.get(`https://live.douyin.com/webcast/room/web/enter/?aid=6383&web_rid=${account}&device_platform=web&enter_from=web_live&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=120&cookie_enabled=true`, {
+          headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookieStr },
+          responseType: 'text', timeout: 15000,
         })
-        if (!raw || raw.length < 10) return `响应过短(${raw ? raw.length : 0}字节)`
-        const json = JSON.parse(raw)
-        const inner = json.data || json
-        return `status_code=${inner.status_code}\nroom_status=${inner.room_status}\ndataCount=${inner.data?.length || 0}\n${raw.substring(0, 400)}`
+        return raw ? `OK ${raw.length}B: ${raw.substring(0, 300)}` : `空响应`
       } catch (e) {
         return `错误: ${e.message}`
       }
