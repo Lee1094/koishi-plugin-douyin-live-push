@@ -1,0 +1,17 @@
+{
+  "name": "koishi-plugin-douyin-live-push",
+  "version": "1.0.0",
+  "description": "Douyin live status monitor — push go-live/offline alerts to QQ groups",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": ["koishi", "koishi-plugin", "douyin", "douyin", "live", "push"],
+  "peerDependencies": {
+    "koishi": "^4.18.0"
+  },
+  "koishi": {
+    "description": {
+      "zh": "抖音直播开播/下播提醒。轮询主播状态，开播下播时推送消息到指定群。支持多主播、分群推送。",
+      "en": "Douyin live go-live/offline alerts. Poll streamer status, push to QQ groups on change."
+    }
+  }
+}
