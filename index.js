@@ -32,24 +32,16 @@ function apply(ctx, config) {
 
   let timer = null
 
-  // ===== 获取 Cookie（先访问主页拿真实 Cookie）=====
-  let cookieStr = ''
-  ;(async () => {
-    try {
-      const res = await ctx.http.get('https://live.douyin.com/', {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
-        responseType: 'text',
-      })
-      // Koishi http 可能返回 { data, headers } 或直接 string
-      const headers = res?.headers || {}
-      const setCookie = headers['set-cookie'] || ''
-      const cookies = Array.isArray(setCookie) ? setCookie.join('; ') : setCookie
-      cookieStr = cookies
-      ctx.logger.info(`[douyin] Cookie 已获取: ${cookieStr.substring(0, 80)}...`)
-    } catch (e) {
-      ctx.logger.warn(`[douyin] Cookie 获取失败: ${e.message}`)
-    }
-  })()
+  // ===== 构造 Cookie =====
+  // ttwid 是核心认证 cookie，本地生成 uuid 格式即可
+  function genUUID() {
+    return 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
+    })
+  }
+  const cookieStr = `ttwid=1|${genUUID()}|${genUUID()}|${Math.floor(Date.now() / 1000)}|${genUUID()}`
+  ctx.logger.info(`[douyin] Cookie: ${cookieStr.substring(0, 60)}...`)
 
   // ===== 查询单个主播状态（API 方式 + 真实 Cookie）=====
   async function checkStreamer(s) {
@@ -72,33 +64,37 @@ function apply(ctx, config) {
           'Referer': `https://live.douyin.com/${s.account}`,
           'Cookie': cookieStr,
         },
-        responseType: 'json',
+        responseType: 'text',
         timeout: 10000,
       })
 
-      // raw 可能是解析好的 JSON，也可能是 { data: ... }
-      const json = (raw && raw.data) ? raw.data : raw
-      if (!json || typeof json !== 'object') {
-        ctx.logger.warn(`[douyin] "${s.name}" 响应无效: ${typeof raw} ${JSON.stringify(raw).substring(0, 100)}`)
+      if (!raw || raw.length < 10) {
+        ctx.logger.warn(`[douyin] "${s.name}" 响应过短(${raw ? raw.length : 0}字节)`)
         return
       }
 
-      const statusCode = json.status_code
+      let json
+      try { json = JSON.parse(raw) } catch {
+        ctx.logger.warn(`[douyin] "${s.name}" 非JSON(${raw.length}B): ${raw.substring(0, 200)}`)
+        return
+      }
+
+      // 响应结构: { data: { status_code, data: [...], room_status, user: {...} } }
+      const inner = json.data || json
+      const statusCode = inner.status_code
       if (statusCode !== 0) {
-        ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode} msg=${json.status_msg || ''}`)
+        ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode} msg=${inner.status_msg || ''}`)
         return
       }
 
-      const inner = json.data
-      const roomList = inner && inner.data ? inner.data : (Array.isArray(inner) ? inner : null)
-
-      if (!roomList || (Array.isArray(roomList) && roomList.length === 0)) {
+      const roomList = inner.data
+      if (!roomList || !Array.isArray(roomList) || roomList.length === 0) {
         ctx.logger.info(`[douyin] "${s.name}" 未开播`)
         updateStatus(s, 1, {})
         return
       }
 
-      const room = Array.isArray(roomList) ? roomList[0] : roomList
+      const room = roomList[0]
       const roomStatus = inner.room_status ?? room.status ?? room.room_status
       const roomTitle = room.title || ''
       const coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
@@ -203,9 +199,6 @@ function apply(ctx, config) {
 
   // ===== 启动 =====
   async function start() {
-    let retry = 0
-    while (!cookieStr && retry < 10) { await new Promise(r => setTimeout(r, 500)); retry++ }
-    if (!cookieStr) ctx.logger.warn('[douyin] Cookie 未获取，尝试无 cookie 查询')
     await pollAll()
     timer = setInterval(pollAll, (config.interval || 60) * 1000)
     ctx.logger.info(`[douyin] 开始监控 ${(config.streamers || []).filter(s => s.enabled !== false).length} 个主播，间隔 ${config.interval || 60}s`)
