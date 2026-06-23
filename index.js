@@ -60,12 +60,13 @@ function apply(ctx, config) {
 
       // 括号计数提取完整 JSON 块
       const extractJSON = (str, key) => {
-        const re = new RegExp(`"${key}"\\s*:\\s*`)
-        const m = str.match(re)
-        if (!m) return null
-        let i = m.index + m[0].length
-        while (i < str.length && /\s/.test(str[i])) i++
-        if (i >= str.length || (str[i] !== '{' && str[i] !== '[')) return null
+        // 先定位 key
+        const idx = str.indexOf(`"${key}"`)
+        if (idx < 0) return null
+        // 从 key 后面找第一个 { 或 [
+        let i = idx + key.length + 2 // skip "key"
+        while (i < str.length && str[i] !== '{' && str[i] !== '[') i++
+        if (i >= str.length) return null
         const open = str[i], close = open === '{' ? '}' : ']'
         let depth = 0, start = i
         while (i < str.length) {
