@@ -2,7 +2,6 @@ const { Schema, h } = require('koishi')
 const fs = require('fs')
 const path = require('path')
 
-const DOUYIN_API = 'https://live.douyin.com/webcast/room/web/enter/'
 const STATE_FILE = path.join(__dirname, 'live_state.json')
 
 const StreamerConfig = Schema.object({
@@ -44,72 +43,73 @@ function apply(ctx, config) {
   ctx.logger.info(`[douyin] ttwid 已生成: ${ttwid.substring(0, 16)}...`)
 
   // ===== 查询单个主播状态 =====
+  // 方法1: 抓直播间页面 HTML（稳定）
+  // 方法2: 直接调 API（需要签名，可能被拦）
   async function checkStreamer(s) {
-    try {
-      const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Referer': `https://live.douyin.com/${s.account}`,
-        'Cookie': `ttwid=${ttwid}`,
-      }
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      'Cookie': `ttwid=${ttwid}`,
+    }
 
-      // 先取 text，看原始响应
-      const raw = await ctx.http.get(DOUYIN_API, {
-        params: {
-          aid: '6383',
-          device_platform: 'web',
-          enter_from: 'web_live',
-          cookie_enabled: 'true',
-          browser_language: 'zh-CN',
-          browser_platform: 'Win32',
-          browser_name: 'Chrome',
-          browser_version: '120.0.0.0',
-          web_rid: s.account,
-        },
+    try {
+      // 方法1: 抓直播间页面
+      const html = await ctx.http.get(`https://live.douyin.com/${s.account}`, {
         headers,
         responseType: 'text',
         timeout: 10000,
       })
 
-      if (!raw || raw.length === 0) {
-        ctx.logger.warn(`[douyin] "${s.name}" 响应为空`)
+      if (!html || html.length < 100) {
+        ctx.logger.warn(`[douyin] "${s.name}" 页面过短(${html ? html.length : 0}字节)`)
         return
       }
 
-      // 尝试解析 JSON
-      let json
-      try {
-        json = JSON.parse(raw)
-      } catch {
-        ctx.logger.warn(`[douyin] "${s.name}" 非JSON响应(${raw.length}字节): ${raw.substring(0, 200)}`)
+      // 从页面提取内嵌 JSON: window.__INIT_PROPS__ = {...} 或 "state":{...}
+      // 抖音在页面里嵌了两个 JS 变量: RENDER_DATA 和 __INIT_PROPS__
+      const patterns = [
+        /window\.__INIT_PROPS__\s*=\s*(\{.*?\});\s*<\/script>/s,
+        /<script[^>]*id="RENDER_DATA"[^>]*>([^<]+)<\/script>/,
+        /"state":(\{.*?"roomStore".*?\})\s*<\/script>/s,
+      ]
+
+      let jsonStr = null
+      for (const re of patterns) {
+        const m = html.match(re)
+        if (m) {
+          jsonStr = m[1]
+          // 处理 URL 编码的 JSON
+          try { jsonStr = decodeURIComponent(jsonStr) } catch {}
+          break
+        }
+      }
+
+      if (!jsonStr) {
+        ctx.logger.warn(`[douyin] "${s.name}" 未找到内嵌数据 (${html.length}字节)`)
         return
       }
 
-      const inner = (json && json.data) || json
-      const statusCode = inner.status_code
+      const data = JSON.parse(jsonStr)
+      // 数据路径: state.roomStore.roomInfo 或直接 roomInfo
+      const roomInfo = data?.roomInfo
+        || data?.state?.roomStore?.roomInfo
+        || data?.initialState?.roomStore?.roomInfo
 
-      if (statusCode !== 0) {
-        ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode}, msg=${inner.status_msg || ''}`)
+      if (!roomInfo) {
+        ctx.logger.warn(`[douyin] "${s.name}" 找不到 roomInfo`)
         return
       }
 
-      const roomList = inner.data
-      if (!roomList || (Array.isArray(roomList) && roomList.length === 0)) {
-        ctx.logger.info(`[douyin] "${s.name}" 未开播`)
-        updateStatus(s, 1, {})
-        return
-      }
-
-      const room = Array.isArray(roomList) ? roomList[0] : roomList
-      const roomStatus = inner.room_status ?? room.status ?? room.room_status
+      const room = roomInfo.room || roomInfo
+      const roomStatus = room.status  // 2=直播中
       const roomTitle = room.title || ''
       const coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
-      const nickname = (inner.user && inner.user.nickname) || s.name
-      const avatarUrl = (inner.user && inner.user.avatar_thumb && inner.user.avatar_thumb.url_list && inner.user.avatar_thumb.url_list[0]) || ''
+      const nickname = (roomInfo.anchor && roomInfo.anchor.nickname) || s.name
+      const avatarUrl = (roomInfo.anchor && roomInfo.anchor.avatar_thumb && roomInfo.anchor.avatar_thumb.url_list && roomInfo.anchor.avatar_thumb.url_list[0]) || ''
 
       if (roomStatus === undefined || roomStatus === null) {
-        ctx.logger.warn(`[douyin] "${s.name}" 无法获取 room_status, 响应keys: ${Object.keys(inner).join(',')}`)
+        ctx.logger.warn(`[douyin] "${s.name}" 无法获取 status, keys: ${Object.keys(room).join(',')}`)
         return
       }
 
