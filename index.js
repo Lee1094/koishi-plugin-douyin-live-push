@@ -74,11 +74,13 @@ function apply(ctx, config) {
       let nickname = s.name
       let avatarUrl = ''
 
-      // 方法: 找到 "roomStore" 位置，用计数器提取完整 JSON 对象
+      // 用计数器提取完整 JSON 对象
       const extractJSON = (str, key) => {
-        const pos = str.indexOf(`"${key}":`)
-        if (pos < 0) return null
-        let start = pos + key.length + 3 // skip "key":
+        // 尝试多种格式: "key": / "key" : / key:
+        const re = new RegExp(`"${key}"\\s*:\\s*`)
+        const m = str.match(re)
+        if (!m) return null
+        let start = m.index + m[0].length
         while (start < str.length && str[start] !== '{' && str[start] !== '[') start++
         if (start >= str.length) return null
         const open = str[start]
@@ -95,7 +97,7 @@ function apply(ctx, config) {
 
       const roomStoreJSON = extractJSON(html, 'roomStore')
       if (!roomStoreJSON) {
-        ctx.logger.warn(`[douyin] "${s.name}" 未找到 roomStore`)
+        ctx.logger.warn(`[douyin] "${s.name}" 未找到 roomStore (页面${html.length}字节) 头部: ${html.substring(0, 100)}`)
         return
       }
 
