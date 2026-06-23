@@ -30,117 +30,87 @@ function apply(ctx, config) {
   }
   Object.assign(statusMap, loadState())
 
-  let ttwid = ''
   let timer = null
 
-  // ===== 生成 ttwid =====
-  function genTtwid() {
-    // ttwid 本质是浏览器指纹 UUID，本地生成即可
-    const hex = () => Math.random().toString(16).substring(2, 10)
-    return `${hex()}${hex()}${hex()}${hex()}`
-  }
-  ttwid = genTtwid()
-  ctx.logger.info(`[douyin] ttwid 已生成: ${ttwid.substring(0, 16)}...`)
-
-  // ===== 查询单个主播状态 =====
-  // 方法1: 抓直播间页面 HTML（稳定）
-  // 方法2: 直接调 API（需要签名，可能被拦）
-  async function checkStreamer(s) {
-    const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9',
-      'Cookie': `ttwid=${ttwid}`,
-    }
-
+  // ===== 获取 Cookie（先访问主页拿真实 Cookie）=====
+  let cookieStr = ''
+  ;(async () => {
     try {
-      // 方法1: 抓直播间页面
-      const html = await ctx.http.get(`https://live.douyin.com/${s.account}`, {
-        headers,
+      const res = await ctx.http.get('https://live.douyin.com/', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
         responseType: 'text',
+      })
+      // Koishi http 可能返回 { data, headers } 或直接 string
+      const headers = res?.headers || {}
+      const setCookie = headers['set-cookie'] || ''
+      const cookies = Array.isArray(setCookie) ? setCookie.join('; ') : setCookie
+      cookieStr = cookies
+      ctx.logger.info(`[douyin] Cookie 已获取: ${cookieStr.substring(0, 80)}...`)
+    } catch (e) {
+      ctx.logger.warn(`[douyin] Cookie 获取失败: ${e.message}`)
+    }
+  })()
+
+  // ===== 查询单个主播状态（API 方式 + 真实 Cookie）=====
+  async function checkStreamer(s) {
+    try {
+      const raw = await ctx.http.get('https://live.douyin.com/webcast/room/web/enter/', {
+        params: {
+          aid: '6383',
+          device_platform: 'web',
+          enter_from: 'web_live',
+          cookie_enabled: 'true',
+          browser_language: 'zh-CN',
+          browser_platform: 'Win32',
+          browser_name: 'Chrome',
+          browser_version: '120.0.0.0',
+          web_rid: s.account,
+        },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+          'Referer': `https://live.douyin.com/${s.account}`,
+          'Cookie': cookieStr,
+        },
+        responseType: 'json',
         timeout: 10000,
       })
 
-      if (!html || html.length < 100) {
-        ctx.logger.warn(`[douyin] "${s.name}" 页面过短(${html ? html.length : 0}字节)`)
+      // raw 可能是解析好的 JSON，也可能是 { data: ... }
+      const json = (raw && raw.data) ? raw.data : raw
+      if (!json || typeof json !== 'object') {
+        ctx.logger.warn(`[douyin] "${s.name}" 响应无效: ${typeof raw} ${JSON.stringify(raw).substring(0, 100)}`)
         return
       }
 
-      // 从页面提取内嵌数据 —— 用手动括号计数提取完整 JSON 块
-      let roomInfo = null
-      let roomStatus = null
-      let roomTitle = ''
-      let coverUrl = ''
-      let nickname = s.name
-      let avatarUrl = ''
-
-      // 用计数器提取完整 JSON 对象
-      const extractJSON = (str, key) => {
-        // 尝试多种格式: "key": / "key" : / key:
-        const re = new RegExp(`"${key}"\\s*:\\s*`)
-        const m = str.match(re)
-        if (!m) return null
-        let start = m.index + m[0].length
-        while (start < str.length && str[start] !== '{' && str[start] !== '[') start++
-        if (start >= str.length) return null
-        const open = str[start]
-        const close = open === '{' ? '}' : ']'
-        let depth = 0, i = start
-        while (i < str.length) {
-          if (str[i] === '\\') { i += 2; continue }
-          if (str[i] === open) depth++
-          else if (str[i] === close) { depth--; if (depth === 0) break }
-          i++
-        }
-        return str.substring(start, i + 1)
-      }
-
-      const roomStoreJSON = extractJSON(html, 'roomStore')
-      if (!roomStoreJSON) {
-        // 没找到 roomStore，搜其他可能的 key
-        const keys = ['roomStore', 'roomInfo', '__INIT_PROPS__', 'RENDER_DATA', 'liveStatus', 'webcast']
-        const found = keys.filter(k => html.indexOf(`"${k}"`) > 0)
-        ctx.logger.warn(`[douyin] "${s.name}" 未找到 roomStore, 找到的key: ${found.join(',')}`)
-        if (found.length === 0) {
-          // 打印页面中间部分看看
-          const mid = Math.floor(html.length / 2)
-          ctx.logger.warn(`[douyin] 页面中间: ${html.substring(mid, mid + 200)}`)
-        }
+      const statusCode = json.status_code
+      if (statusCode !== 0) {
+        ctx.logger.warn(`[douyin] "${s.name}" status_code=${statusCode} msg=${json.status_msg || ''}`)
         return
       }
 
-      try {
-        const roomStore = JSON.parse(roomStoreJSON)
-        roomInfo = roomStore.roomInfo || {}
-        roomStatus = roomStore.liveStatus || (roomInfo.room ? roomInfo.room.status : undefined)
-        // liveStatus 是字符串: "normal"=未开播, 直播时会变成数字或 "live"
-        // roomInfo.room.status 是数字: 2=直播中
-      } catch {
-        ctx.logger.warn(`[douyin] "${s.name}" roomStore JSON 解析失败`)
+      const inner = json.data
+      const roomList = inner && inner.data ? inner.data : (Array.isArray(inner) ? inner : null)
+
+      if (!roomList || (Array.isArray(roomList) && roomList.length === 0)) {
+        ctx.logger.info(`[douyin] "${s.name}" 未开播`)
+        updateStatus(s, 1, {})
         return
       }
 
-      // 检查 roomInfo 是否为空（未开播）
-      const hasRoom = roomInfo && roomInfo.room
-      if (hasRoom) {
-        const room = roomInfo.room
-        roomStatus = room.status
-        roomTitle = room.title || ''
-        coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
-        nickname = (roomInfo.anchor && roomInfo.anchor.nickname) || s.name
-        avatarUrl = (roomInfo.anchor && roomInfo.anchor.avatar_thumb && roomInfo.anchor.avatar_thumb.url_list && roomInfo.anchor.avatar_thumb.url_list[0]) || ''
-      } else {
-        // 未开播
-        roomStatus = roomStatus === 'live' ? 2 : 1
-      }
+      const room = Array.isArray(roomList) ? roomList[0] : roomList
+      const roomStatus = inner.room_status ?? room.status ?? room.room_status
+      const roomTitle = room.title || ''
+      const coverUrl = (room.cover && room.cover.url_list && room.cover.url_list[0]) || ''
+      const nickname = (inner.user && inner.user.nickname) || s.name
 
-      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} roomInfo=${hasRoom ? '有' : '空'}`)
+      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}"`)
 
       updateStatus(s, roomStatus, {
         title: roomTitle,
         cover: coverUrl,
         nickname,
-        avatar: avatarUrl,
+        avatar: '',
       })
     } catch (e) {
       ctx.logger.warn(`[douyin] "${s.name}" 查询异常: ${e.message}`)
@@ -233,9 +203,10 @@ function apply(ctx, config) {
 
   // ===== 启动 =====
   async function start() {
-    // 先跑一轮检测
+    let retry = 0
+    while (!cookieStr && retry < 10) { await new Promise(r => setTimeout(r, 500)); retry++ }
+    if (!cookieStr) ctx.logger.warn('[douyin] Cookie 未获取，尝试无 cookie 查询')
     await pollAll()
-    // 开始定时
     timer = setInterval(pollAll, (config.interval || 60) * 1000)
     ctx.logger.info(`[douyin] 开始监控 ${(config.streamers || []).filter(s => s.enabled !== false).length} 个主播，间隔 ${config.interval || 60}s`)
   }
