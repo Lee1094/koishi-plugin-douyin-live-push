@@ -28,103 +28,63 @@ function apply(ctx, config) {
   }
   Object.assign(statusMap, loadState())
 
-  let timer = null
+  let timer = null, ttwid = ''
 
-  // ===== 查询主播：直接抓页面 HTML 提取数据 =====
-  async function checkStreamer(s) {
+  // ===== 获取 ttwid（和 aio-dynamic-push 同样的方式）=====
+  async function getTtwid() {
     try {
-      // 完整模拟浏览器
-      const html = await ctx.http.get(`https://live.douyin.com/${s.account}`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Cache-Control': 'max-age=0',
-          'Sec-Ch-Ua': '"Google Chrome";v="120", "Not?A_Brand";v="8"',
-          'Sec-Ch-Ua-Mobile': '?0',
-          'Sec-Ch-Ua-Platform': '"Windows"',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Upgrade-Insecure-Requests': '1',
-        },
+      const res = await ctx.http.post('https://ttwid.bytedance.com/ttwid/union/register/', {
+        region: 'cn', aid: 6383, needFid: false,
+        service: 'www.ixigua.com',
+        migrate_info: { ticket: '', source: 'node' },
+        cbUrlProtocol: 'https', union: true,
+      }, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Content-Type': 'application/json' },
         responseType: 'text',
-        timeout: 15000,
       })
-
-      if (!html || html.length < 500) {
-        ctx.logger.warn(`[douyin] "${s.name}" 页面过短(${html ? html.length : 0}字节)`)
-        return
+      // 响应可能是 { headers: {...} } 或纯文本
+      const headers = res?.headers || {}
+      const setCookie = headers['set-cookie'] || headers['Set-Cookie'] || ''
+      if (typeof setCookie === 'string') {
+        const m = setCookie.match(/ttwid=([^;]+)/)
+        if (m) ttwid = m[1]
       }
-
-      // 尝试多种方式提取直播数据
-      let roomStatus = null, roomTitle = '', coverUrl = '', nickname = s.name
-
-      // 方式1: RENDER_DATA 脚本标签（最干净的 JSON）
-      const rdMatch = html.match(/<script[^>]*id="RENDER_DATA"[^>]*>([\s\S]*?)<\/script>/i)
-      if (rdMatch) {
+      if (!ttwid) {
+        // 尝试从响应体提取
         try {
-          const rd = JSON.parse(decodeURIComponent(rdMatch[1].trim()))
-          const rs = getNested(rd, 'app.initialState.roomStore') || getNested(rd, 'roomStore')
-          if (rs) parseRoomStore(rs)
+          const body = typeof res === 'string' ? JSON.parse(res) : res
+          if (body?.ttwid) ttwid = body.ttwid
         } catch {}
       }
-
-      // 方式2: __INIT_PROPS__
-      if (roomStatus == null) {
-        const ip = html.match(/self\.__INIT_PROPS__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/i)
-        if (ip) {
-          try {
-            const props = JSON.parse(ip[1])
-            const rs = getNested(props, 'roomStore') || getNested(props, 'app.initialState.roomStore')
-            if (rs) parseRoomStore(rs)
-          } catch {}
-        }
-      }
-
-      // 方式3: 在页面任意位置找 roomInfo 或 status
-      if (roomStatus == null) {
-        // 找 "status":2 或 "status":4 等直播状态
-        const st = html.match(/"status"\s*:\s*(\d+)/)
-        const title = html.match(/"title"\s*:\s*"([^"]+)"/)
-        if (st) roomStatus = parseInt(st[1])
-        if (title) roomTitle = title[1]
-      }
-
-      function getNested(obj, path) {
-        return path.split('.').reduce((o, k) => o?.[k], obj)
-      }
-
-      function parseRoomStore(rs) {
-        const ri = rs.roomInfo || {}
-        const room = ri.room
-        if (room) {
-          roomStatus = room.status
-          roomTitle = room.title || ''
-          coverUrl = room.cover?.url_list?.[0] || ''
-          nickname = ri.anchor?.nickname || s.name
-        } else {
-          roomStatus = rs.liveStatus === 'live' ? 2 : 1
-        }
-      }
-
-      if (roomStatus == null) {
-        ctx.logger.warn(`[douyin] "${s.name}" 未提取到状态 (${html.length}B)`)
-        return
-      }
-
-      ctx.logger.info(`[douyin] "${s.name}" 状态=${roomStatus} 标题="${roomTitle}"`)
-
-      updateStatus(s, roomStatus, {
-        title: roomTitle,
-        cover: coverUrl,
-        nickname,
-        avatar: '',
-      })
-    } catch (e) {
-      ctx.logger.warn(`[douyin] "${s.name}" 异常: ${e.message}`)
+    } catch (e) {}
+    if (!ttwid) {
+      // 本地生成兜底
+      const h = () => Math.random().toString(16).substring(2, 10)
+      ttwid = `1|${h()}${h()}${h()}${h()}|${Math.floor(Date.now()/1000)}|${h()}${h()}${h()}${h()}`
     }
+    ctx.logger.info(`[douyin] ttwid=${ttwid.substring(0, 20)}...`)
+  }
+
+  // ===== 查询单个主播（API 方式）=====
+  async function checkStreamer(s) {
+    if (!ttwid) return
+    try {
+      const raw = await ctx.http.get('https://live.douyin.com/webcast/room/web/enter/', {
+        params: { aid: '6383', device_platform: 'web', enter_from: 'web_live', cookie_enabled: 'true', browser_language: 'zh-CN', browser_platform: 'Win32', browser_name: 'Chrome', browser_version: '120.0.0.0', web_rid: s.account },
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Cookie': `ttwid=${ttwid}`, 'Referer': `https://live.douyin.com/${s.account}` },
+        responseType: 'text', timeout: 10000,
+      })
+      if (!raw || raw.length < 10) return
+      const json = JSON.parse(raw)
+      const inner = (json && json.data) || json
+      if (inner.status_code !== 0) { ctx.logger.warn(`[douyin] "${s.name}" code=${inner.status_code}`); return }
+      const list = inner.data
+      if (!list || !Array.isArray(list) || !list.length) { updateStatus(s, 1, {}); return }
+      const room = list[0]
+      const st = inner.room_status ?? room.status
+      ctx.logger.info(`[douyin] "${s.name}" 状态=${st} 标题="${room.title||''}"`)
+      updateStatus(s, st, { title: room.title||'', cover: room.cover?.url_list?.[0]||'', nickname: inner.user?.nickname||s.name, avatar: '' })
+    } catch (e) { ctx.logger.debug(`[douyin] "${s.name}" err: ${e.message}`) }
   }
 
   function updateStatus(streamer, newStatus, info) {
@@ -193,6 +153,7 @@ function apply(ctx, config) {
 
   // ===== 启动 =====
   async function start() {
+    await getTtwid()
     await pollAll()
     timer = setInterval(pollAll, (config.interval || 60) * 1000)
     ctx.logger.info(`[douyin] 监控 ${(config.streamers || []).filter(s => s.enabled !== false).length} 个主播，间隔 ${config.interval || 60}s`)
