@@ -30,8 +30,12 @@ function apply(ctx, config) {
 
   let timer = null, ttwid = ''
 
-  // ===== 获取 ttwid（和 aio-dynamic-push 同样的方式）=====
+  // ===== 获取 ttwid =====
   async function getTtwid() {
+    // 先直接本地生成（ttwid 本质是随机指纹，服务端版也经常不通）
+    const h = () => Math.random().toString(16).substring(2, 10)
+    ttwid = `1|${h()}${h()}${h()}${h()}|${Math.floor(Date.now()/1000)}|${h()}${h()}${h()}${h()}`
+    // 尝试从服务端获取（覆盖本地值）
     try {
       const res = await ctx.http.post('https://ttwid.bytedance.com/ttwid/union/register/', {
         region: 'cn', aid: 6383, needFid: false,
@@ -40,41 +44,29 @@ function apply(ctx, config) {
         cbUrlProtocol: 'https', union: true,
       }, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Content-Type': 'application/json' },
-        responseType: 'text',
       })
-      // 响应可能是 { headers: {...} } 或纯文本
-      const headers = res?.headers || {}
-      const setCookie = headers['set-cookie'] || headers['Set-Cookie'] || ''
-      if (typeof setCookie === 'string') {
-        const m = setCookie.match(/ttwid=([^;]+)/)
-        if (m) ttwid = m[1]
+      const setCookie = res.headers?.['set-cookie']
+      if (setCookie) {
+        const cookies = Array.isArray(setCookie) ? setCookie : [setCookie]
+        for (const c of cookies) {
+          const m = c.match(/ttwid=([^;]+)/)
+          if (m) { ttwid = m[1]; break }
+        }
       }
-      if (!ttwid) {
-        // 尝试从响应体提取
-        try {
-          const body = typeof res === 'string' ? JSON.parse(res) : res
-          if (body?.ttwid) ttwid = body.ttwid
-        } catch {}
-      }
-    } catch (e) {}
-    if (!ttwid) {
-      // 本地生成兜底
-      const h = () => Math.random().toString(16).substring(2, 10)
-      ttwid = `1|${h()}${h()}${h()}${h()}|${Math.floor(Date.now()/1000)}|${h()}${h()}${h()}${h()}`
-    }
+    } catch (e) { ctx.logger.debug(`[douyin] ttwid 服务端获取失败，用本地值`) }
     ctx.logger.info(`[douyin] ttwid=${ttwid.substring(0, 20)}...`)
   }
 
   // ===== 查询单个主播（API 方式）=====
   async function checkStreamer(s) {
-    if (!ttwid) return
+    if (!ttwid) { ctx.logger.warn(`[douyin] ttwid 为空，跳过查询`); return }
     try {
       const raw = await ctx.http.get('https://live.douyin.com/webcast/room/web/enter/', {
         params: { aid: '6383', device_platform: 'web', enter_from: 'web_live', cookie_enabled: 'true', browser_language: 'zh-CN', browser_platform: 'Win32', browser_name: 'Chrome', browser_version: '120.0.0.0', web_rid: s.account },
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Cookie': `ttwid=${ttwid}`, 'Referer': `https://live.douyin.com/${s.account}` },
         responseType: 'text', timeout: 10000,
       })
-      if (!raw || raw.length < 10) return
+      if (!raw || raw.length < 10) { ctx.logger.warn(`[douyin] "${s.name}" 响应空`); return }
       const json = JSON.parse(raw)
       const inner = (json && json.data) || json
       if (inner.status_code !== 0) { ctx.logger.warn(`[douyin] "${s.name}" code=${inner.status_code}`); return }
@@ -84,7 +76,7 @@ function apply(ctx, config) {
       const st = inner.room_status ?? room.status
       ctx.logger.info(`[douyin] "${s.name}" 状态=${st} 标题="${room.title||''}"`)
       updateStatus(s, st, { title: room.title||'', cover: room.cover?.url_list?.[0]||'', nickname: inner.user?.nickname||s.name, avatar: '' })
-    } catch (e) { ctx.logger.debug(`[douyin] "${s.name}" err: ${e.message}`) }
+    } catch (e) { ctx.logger.warn(`[douyin] "${s.name}" err: ${e.message}`) }
   }
 
   function updateStatus(streamer, newStatus, info) {
